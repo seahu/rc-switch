@@ -13,6 +13,7 @@
   - Robert ter Vehn / <first name>.<last name>(at)gmail(dot)com
   - Johann Richard / <first name>.<last name>(at)gmail(dot)com
   - Vlad Gheorghe / <first name>.<last name>(at)gmail(dot)com https://github.com/vgheo
+  - Ondrej Lycka / <frist name>.<last name>(at)seznam(dot)cz http:\\www.seahu.cz
   
   Project home: https://github.com/sui77/rc-switch/
 
@@ -78,7 +79,8 @@ static const RCSwitch::Protocol PROGMEM proto[] = {
   { 100, { 30, 71 }, {  4, 11 }, {  9,  6 }, false },    // protocol 3
   { 380, {  1,  6 }, {  1,  3 }, {  3,  1 }, false },    // protocol 4
   { 500, {  6, 14 }, {  1,  2 }, {  2,  1 }, false },    // protocol 5
-  { 450, { 23,  1 }, {  1,  2 }, {  2,  1 }, true }      // protocol 6 (HT6P20B)
+  { 450, { 23,  1 }, {  1,  2 }, {  2,  1 }, true },      // protocol 6 (HT6P20B)
+  { 250, { 1,  10 }, {  1,  1 }, {  1,  5 }, false },      // protocol 6 (new kaku)
 };
 
 enum {
@@ -96,6 +98,11 @@ const unsigned int RCSwitch::nSeparationLimit = 4300;
 // according to discussion on issue #14 it might be more suitable to set the separation
 // limit to the same time as the 'low' part of the sync signal for the current protocol.
 unsigned int RCSwitch::timings[RCSWITCH_MAX_CHANGES];
+#ifdef RaspberryPi
+pthread_cond_t thread_flag_cv;
+pthread_mutex_t thread_flag_mutex;
+#endif
+
 #endif
 
 RCSwitch::RCSwitch() {
@@ -106,6 +113,10 @@ RCSwitch::RCSwitch() {
   this->nReceiverInterrupt = -1;
   this->setReceiveTolerance(60);
   RCSwitch::nReceivedValue = 0;
+  #endif
+  #ifdef RaspberryPi
+  pthread_mutex_init(&thread_flag_mutex, NULL);
+  pthread_cond_init(&thread_flag_cv, NULL);
   #endif
 }
 
@@ -559,6 +570,13 @@ void RCSwitch::disableReceive() {
 }
 
 bool RCSwitch::available() {
+  #ifdef RaspberryPi
+  pthread_mutex_lock(&thread_flag_mutex);
+  while ( RCSwitch::nReceivedValue == 0 ){
+	  pthread_cond_wait(&thread_flag_cv, &thread_flag_mutex);
+  }
+  pthread_mutex_unlock(&thread_flag_mutex);
+  #endif
   return RCSwitch::nReceivedValue != 0;
 }
 
@@ -643,10 +661,18 @@ bool RECEIVE_ATTR RCSwitch::receiveProtocol(const int p, unsigned int changeCoun
     }
 
     if (changeCount > 7) {    // ignore very short transmissions: no device sends them, so this must be noise
+		#ifdef RaspberryPi
+		pthread_mutex_lock(&thread_flag_mutex);
+		#endif
         RCSwitch::nReceivedValue = code;
         RCSwitch::nReceivedBitlength = (changeCount - 1) / 2;
         RCSwitch::nReceivedDelay = delay;
         RCSwitch::nReceivedProtocol = p;
+		#ifdef RaspberryPi
+		//place for threader conditions set
+		pthread_cond_signal(&thread_flag_cv);
+		pthread_mutex_unlock(&thread_flag_mutex);
+		#endif
         return true;
     }
 
@@ -662,6 +688,7 @@ void RECEIVE_ATTR RCSwitch::handleInterrupt() {
   const long time = micros();
   const unsigned int duration = time - lastTime;
 
+  //printf("Handle interrupt (OL)%d\n", duration);
   if (duration > RCSwitch::nSeparationLimit) {
     // A long stretch without signal level change occurred. This could
     // be the gap between two transmission.
