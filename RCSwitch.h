@@ -42,6 +42,8 @@
     #include <stdlib.h> /* abs */
     #include <wiringPi.h>
     #include <pthread.h>
+    #include <stdlib.h> /* for debug */
+	#include <stdio.h>  /* for debug */
 #elif defined(SPARK)
     #include "application.h"
 #else
@@ -59,7 +61,7 @@
 
 // Number of maximum high/Low changes per packet.
 // We can handle up to (unsigned long) => 32 bit * 2 H/L changes per bit + 2 for sync
-#define RCSWITCH_MAX_CHANGES 67
+#define RCSWITCH_MAX_CHANGES 300
 
 class RCSwitch {
 
@@ -93,6 +95,8 @@ class RCSwitch {
     unsigned int getReceivedDelay();
     unsigned int getReceivedProtocol();
     unsigned int* getReceivedRawdata();
+    char* getReceiveBinString();
+    char* getLastReceiveBinString();
     #endif
   
     void enableTransmit(int nTransmitterPin);
@@ -122,9 +126,10 @@ class RCSwitch {
         /** base pulse length in microseconds, e.g. 350 */
         uint16_t pulseLength;
 
-        HighLow syncFactor;
+        HighLow startSyncFactor;		// more devices do not use separatlu sync signal insted this use stop signal
         HighLow zero;
         HighLow one;
+        HighLow stopSyncFactor;		// in more cases = sysnc signal
 
         /**
          * If true, interchange high and low logic levels in all transmissions.
@@ -143,6 +148,10 @@ class RCSwitch {
          * FOO.low*pulseLength microseconds.
          */
         bool invertedSignal;
+        /**
+         * some protocol have addition header or syn impuls beforre data. Next item is number impuls to shift start data block.
+         */
+        uint8_t shift;
     };
 
     void setProtocol(Protocol protocol);
@@ -173,6 +182,8 @@ class RCSwitch {
     volatile static unsigned int nReceivedDelay;
     volatile static unsigned int nReceivedProtocol;
     const static unsigned int nSeparationLimit;
+    static char nReceiveBinString[RCSWITCH_MAX_CHANGES/2+1];
+    static char nLastReceiveBinString[RCSWITCH_MAX_CHANGES/2+1];
     /* 
      * timings[0] contains sync timing, followed by a number of bits
      */

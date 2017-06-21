@@ -27,6 +27,7 @@ or more devices with one of the supported chipsets:
  - EV1527 / RT1527 / FP1527 / HS1527 
  - Intertechno outlets
  - HT6P20X
+ - new kaku ( Intertechno new )
 
 ### Receive and decode RC codes
 

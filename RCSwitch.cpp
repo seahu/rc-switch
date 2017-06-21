@@ -74,13 +74,23 @@ static const RCSwitch::Protocol proto[] = {
 #else
 static const RCSwitch::Protocol PROGMEM proto[] = {
 #endif
-  { 350, {  1, 31 }, {  1,  3 }, {  3,  1 }, false },    // protocol 1
-  { 650, {  1, 10 }, {  1,  2 }, {  2,  1 }, false },    // protocol 2
-  { 100, { 30, 71 }, {  4, 11 }, {  9,  6 }, false },    // protocol 3
-  { 380, {  1,  6 }, {  1,  3 }, {  3,  1 }, false },    // protocol 4
-  { 500, {  6, 14 }, {  1,  2 }, {  2,  1 }, false },    // protocol 5
-  { 450, { 23,  1 }, {  1,  2 }, {  2,  1 }, true },      // protocol 6 (HT6P20B)
-  { 250, { 1,  10 }, {  1,  1 }, {  1,  5 }, false },      // protocol 6 (new kaku)
+//{pulse lenght,{start sync impuls},{"0"-bit},{"1"-bit},{stop sync impuls},inverted Signal}
+  { 350, { 0, 0 }, {  1,  3 }, {  3,  1 }, {  1, 31 }, false },    // protocol 1
+  { 650, { 0, 0 }, {  1,  2 }, {  2,  1 }, {  1, 10 }, false },    // protocol 2
+  { 100, { 0, 0 }, {  4, 11 }, {  9,  6 }, { 30, 71 }, false },    // protocol 3
+  { 380, { 0, 0 }, {  1,  3 }, {  3,  1 }, {  1,  6 }, false },    // protocol 4
+  { 500, { 0, 0 }, {  1,  2 }, {  2,  1 }, {  6, 14 }, false },    // protocol 5
+  { 450, { 0, 0 }, {  1,  2 }, {  2,  1 }, { 23,  1 }, true },      // protocol 6 (HT6P20B)
+  { 250, { 1, 10 }, {  1,  1 }, {  1,  5 }, { 1,  40 }, false },      // protocol 7 (new kaku)
+
+
+//  { 350, {  1, 31 }, {  1,  3 }, {  3,  1 }, false, 0 },    // protocol 1
+//  { 650, {  1, 10 }, {  1,  2 }, {  2,  1 }, false, 0 },    // protocol 2
+//  { 100, { 30, 71 }, {  4, 11 }, {  9,  6 }, false, 0 },    // protocol 3
+//  { 380, {  1,  6 }, {  1,  3 }, {  3,  1 }, false, 0 },    // protocol 4
+//  { 500, {  6, 14 }, {  1,  2 }, {  2,  1 }, false, 0 },    // protocol 5
+//  { 450, { 23,  1 }, {  1,  2 }, {  2,  1 }, true, 0 },      // protocol 6 (HT6P20B)
+//  { 250, { 1,  40 }, {  1,  1 }, {  1,  5 }, false, 2 },      // protocol 7 (new kaku - bit0 ="01", bit1="01", dim_flag="00")
 };
 
 enum {
@@ -92,8 +102,11 @@ volatile unsigned long RCSwitch::nReceivedValue = 0;
 volatile unsigned int RCSwitch::nReceivedBitlength = 0;
 volatile unsigned int RCSwitch::nReceivedDelay = 0;
 volatile unsigned int RCSwitch::nReceivedProtocol = 0;
+char RCSwitch::nReceiveBinString[RCSWITCH_MAX_CHANGES/2+1];
+char RCSwitch::nLastReceiveBinString[RCSWITCH_MAX_CHANGES/2+1];
 int RCSwitch::nReceiveTolerance = 60;
-const unsigned int RCSwitch::nSeparationLimit = 4300;
+//const unsigned int RCSwitch::nSeparationLimit = 4300;
+const unsigned int RCSwitch::nSeparationLimit = 3500;
 // separationLimit: minimum microseconds between received codes, closer codes are ignored.
 // according to discussion on issue #14 it might be more suitable to set the separation
 // limit to the same time as the 'low' part of the sync signal for the current protocol.
@@ -102,7 +115,7 @@ unsigned int RCSwitch::timings[RCSWITCH_MAX_CHANGES];
 pthread_cond_t thread_flag_cv;
 pthread_mutex_t thread_flag_mutex;
 #endif
-
+bool EnableReceiver=false; // flag signalzet enabled or disabled interupt (exist because for Raspberry Pi (wiringPi) you can't unregister the ISR)
 #endif
 
 RCSwitch::RCSwitch() {
@@ -113,6 +126,7 @@ RCSwitch::RCSwitch() {
   this->nReceiverInterrupt = -1;
   this->setReceiveTolerance(60);
   RCSwitch::nReceivedValue = 0;
+  memset ( RCSwitch::nReceiveBinString, 0, RCSWITCH_MAX_CHANGES/2+1 );
   #endif
   #ifdef RaspberryPi
   pthread_mutex_init(&thread_flag_mutex, NULL);
@@ -477,17 +491,33 @@ void RCSwitch::sendTriState(const char* sCodeWord) {
  * @param sCodeWord   a binary code word consisting of the letter 0, 1
  */
 void RCSwitch::send(const char* sCodeWord) {
-  // turn the tristate code word into the corresponding bit pattern, then send it
-  unsigned long code = 0;
-  unsigned int length = 0;
-  for (const char* p = sCodeWord; *p; p++) {
-    code <<= 1L;
-    if (*p != '0')
-      code |= 1L;
-    length++;
-  }
-  this->send(code, length);
+	if (this->nTransmitterPin == -1)
+		return;
+
+	#if not defined( RCSwitchDisableReceiving )
+		// make sure the receiver is disabled while we transmit
+		int nReceiverInterrupt_backup = nReceiverInterrupt;
+		if (nReceiverInterrupt_backup != -1) {
+			this->disableReceive();
+		}
+	#endif
+	for (int nRepeat = 0; nRepeat < nRepeatTransmit; nRepeat++) {
+		this->transmit(protocol.startSyncFactor);
+		for (const char* p = sCodeWord; *p; p++) {
+			if (*p == '0') this->transmit(protocol.zero);
+			if (*p == '1') this->transmit(protocol.one);
+		}
+		this->transmit(protocol.stopSyncFactor);
+	}
+
+	#if not defined( RCSwitchDisableReceiving )
+		// enable receiver again if we just disabled it
+		if (nReceiverInterrupt_backup != -1) {
+			this->enableReceive(nReceiverInterrupt_backup);
+		}
+	#endif
 }
+
 
 /**
  * Transmit the first 'length' bits of the integer 'code'. The
@@ -495,33 +525,18 @@ void RCSwitch::send(const char* sCodeWord) {
  * then the bit at position length-2, and so on, till finally the bit at position 0.
  */
 void RCSwitch::send(unsigned long code, unsigned int length) {
-  if (this->nTransmitterPin == -1)
-    return;
 
-#if not defined( RCSwitchDisableReceiving )
-  // make sure the receiver is disabled while we transmit
-  int nReceiverInterrupt_backup = nReceiverInterrupt;
-  if (nReceiverInterrupt_backup != -1) {
-    this->disableReceive();
-  }
-#endif
+	char sendBinString[RCSWITCH_MAX_CHANGES/2+1];
 
-  for (int nRepeat = 0; nRepeat < nRepeatTransmit; nRepeat++) {
+	int j=0;
     for (int i = length-1; i >= 0; i--) {
       if (code & (1L << i))
-        this->transmit(protocol.one);
+		sendBinString[j]=1;
       else
-        this->transmit(protocol.zero);
+		sendBinString[j]=0;
+	  j++;
     }
-    this->transmit(protocol.syncFactor);
-  }
-
-#if not defined( RCSwitchDisableReceiving )
-  // enable receiver again if we just disabled it
-  if (nReceiverInterrupt_backup != -1) {
-    this->enableReceive(nReceiverInterrupt_backup);
-  }
-#endif
+	this->send(sendBinString);
 }
 
 /**
@@ -531,10 +546,14 @@ void RCSwitch::transmit(HighLow pulses) {
   uint8_t firstLogicLevel = (this->protocol.invertedSignal) ? LOW : HIGH;
   uint8_t secondLogicLevel = (this->protocol.invertedSignal) ? HIGH : LOW;
   
-  digitalWrite(this->nTransmitterPin, firstLogicLevel);
-  delayMicroseconds( this->protocol.pulseLength * pulses.high);
-  digitalWrite(this->nTransmitterPin, secondLogicLevel);
-  delayMicroseconds( this->protocol.pulseLength * pulses.low);
+  if (pulses.high>0) {
+	digitalWrite(this->nTransmitterPin, firstLogicLevel);
+	delayMicroseconds( this->protocol.pulseLength * pulses.high);
+  }
+  if (pulses.low>0) {
+	digitalWrite(this->nTransmitterPin, secondLogicLevel);
+	delayMicroseconds( this->protocol.pulseLength * pulses.low);
+  }
 }
 
 
@@ -557,6 +576,7 @@ void RCSwitch::enableReceive() {
     attachInterrupt(this->nReceiverInterrupt, handleInterrupt, CHANGE);
 #endif
   }
+  EnableReceiver=true;
 }
 
 /**
@@ -567,6 +587,7 @@ void RCSwitch::disableReceive() {
   detachInterrupt(this->nReceiverInterrupt);
 #endif // For Raspberry Pi (wiringPi) you can't unregister the ISR
   this->nReceiverInterrupt = -1;
+  EnableReceiver=false;
 }
 
 bool RCSwitch::available() {
@@ -604,6 +625,14 @@ unsigned int* RCSwitch::getReceivedRawdata() {
   return RCSwitch::timings;
 }
 
+char* RCSwitch::getReceiveBinString() {
+  return RCSwitch::nReceiveBinString;
+}
+
+char* RCSwitch::getLastReceiveBinString() {
+  return RCSwitch::nLastReceiveBinString;
+}
+
 /* helper function for the receiveProtocol method */
 static inline unsigned int diff(int A, int B) {
   return abs(A - B);
@@ -613,6 +642,7 @@ static inline unsigned int diff(int A, int B) {
  *
  */
 bool RECEIVE_ATTR RCSwitch::receiveProtocol(const int p, unsigned int changeCount) {
+	if ( changeCount < 8 ) return false; // ignore very short transmissions: no device sends them, so this must be noise
 #ifdef ESP8266
     const Protocol &pro = proto[p-1];
 #else
@@ -622,7 +652,7 @@ bool RECEIVE_ATTR RCSwitch::receiveProtocol(const int p, unsigned int changeCoun
 
     unsigned long code = 0;
     //Assuming the longer pulse length is the pulse captured in timings[0]
-    const unsigned int syncLengthInPulses =  ((pro.syncFactor.low) > (pro.syncFactor.high)) ? (pro.syncFactor.low) : (pro.syncFactor.high);
+    const unsigned int syncLengthInPulses =  ((pro.stopSyncFactor.low) > (pro.stopSyncFactor.high)) ? (pro.stopSyncFactor.low) : (pro.stopSyncFactor.high);
     const unsigned int delay = RCSwitch::timings[0] / syncLengthInPulses;
     const unsigned int delayTolerance = delay * RCSwitch::nReceiveTolerance / 100;
     
@@ -643,44 +673,63 @@ bool RECEIVE_ATTR RCSwitch::receiveProtocol(const int p, unsigned int changeCoun
      *
      * The 2nd saved duration starts the data
      */
-    const unsigned int firstDataTiming = (pro.invertedSignal) ? (2) : (1);
+    unsigned int firstDataTiming = ( (pro.invertedSignal) ? (2) : (1) );
+    //printf("evaluate: pulse:%d delay:%d tolerance:%d frist:%d\n",syncLengthInPulses,delay,delayTolerance,firstDataTiming);
 
-    for (unsigned int i = firstDataTiming; i < changeCount - 1; i += 2) {
+    if (pro.startSyncFactor.high!=0 and pro.startSyncFactor.low!=0) { // protocol use start sysnc signal test it
+        if (diff(RCSwitch::timings[firstDataTiming], delay * pro.startSyncFactor.high) > delayTolerance ||
+            diff(RCSwitch::timings[firstDataTiming + 1], delay * pro.startSyncFactor.low) > delayTolerance) return false;
+        firstDataTiming += 2;
+	}
+	int j=0;
+	memset ( RCSwitch::nReceiveBinString, 0, RCSWITCH_MAX_CHANGES/2+1 );
+    for (unsigned int i=firstDataTiming ; i < changeCount - 1; i += 2) {
         code <<= 1;
         if (diff(RCSwitch::timings[i], delay * pro.zero.high) < delayTolerance &&
             diff(RCSwitch::timings[i + 1], delay * pro.zero.low) < delayTolerance) {
+			//printf("vyhodneceni: 0\n");
+			nReceiveBinString[j++]='0';
             // zero
         } else if (diff(RCSwitch::timings[i], delay * pro.one.high) < delayTolerance &&
                    diff(RCSwitch::timings[i + 1], delay * pro.one.low) < delayTolerance) {
+				   nReceiveBinString[j++]='1';
+			//printf("evaluate: 1\n");
             // one
             code |= 1;
         } else {
             // Failed
+            //printf("evaluate: FALSE pulse:%d delay:%d tolerance:%d %d %d\n",syncLengthInPulses,delay,delayTolerance,RCSwitch::timings[i],RCSwitch::timings[i+1]);
             return false;
         }
     }
 
-    if (changeCount > 7) {    // ignore very short transmissions: no device sends them, so this must be noise
-		#ifdef RaspberryPi
-		pthread_mutex_lock(&thread_flag_mutex);
-		#endif
-        RCSwitch::nReceivedValue = code;
-        RCSwitch::nReceivedBitlength = (changeCount - 1) / 2;
-        RCSwitch::nReceivedDelay = delay;
-        RCSwitch::nReceivedProtocol = p;
-		#ifdef RaspberryPi
-		//place for threader conditions set
-		pthread_cond_signal(&thread_flag_cv);
-		pthread_mutex_unlock(&thread_flag_mutex);
-		#endif
-        return true;
-    }
+	//printf("L: %s\n",RCSwitch::nLastReceiveBinString);
+	//printf("N: %s\n",RCSwitch::nReceiveBinString);
+	//printf("C: %d\n\n",strncmp(RCSwitch::nLastReceiveBinString, RCSwitch::nReceiveBinString, RCSWITCH_MAX_CHANGES/2+1));
+	
+	if (strncmp(RCSwitch::nLastReceiveBinString, RCSwitch::nReceiveBinString, RCSWITCH_MAX_CHANGES/2+1) !=0) {
+		strncpy( RCSwitch::nLastReceiveBinString, RCSwitch::nReceiveBinString, RCSWITCH_MAX_CHANGES/2+1);
+		return false; // packets must be min. 2 times the same
+	}
+	
+	#ifdef RaspberryPi
+	pthread_mutex_lock(&thread_flag_mutex);
+	#endif
+	RCSwitch::nReceivedValue = code;
+	RCSwitch::nReceivedBitlength = (changeCount - 1) / 2;
+	RCSwitch::nReceivedDelay = delay;
+	RCSwitch::nReceivedProtocol = p;
+	#ifdef RaspberryPi
+	//place for threader conditions set
+	pthread_cond_signal(&thread_flag_cv);
+	pthread_mutex_unlock(&thread_flag_mutex);
+	#endif
+	return true;
 
-    return false;
 }
 
 void RECEIVE_ATTR RCSwitch::handleInterrupt() {
-
+  if (EnableReceiver == false) return;										// if no enabled interrupt receiver fast end
   static unsigned int changeCount = 0;
   static unsigned long lastTime = 0;
   static unsigned int repeatCount = 0;
@@ -689,7 +738,9 @@ void RECEIVE_ATTR RCSwitch::handleInterrupt() {
   const unsigned int duration = time - lastTime;
 
   //printf("Handle interrupt (OL)%d\n", duration);
+  //printf("%d\n", duration);
   if (duration > RCSwitch::nSeparationLimit) {
+	//printf("Exceeding the time limit: %d %d\n", changeCount,RCSwitch::timings[0]);
     // A long stretch without signal level change occurred. This could
     // be the gap between two transmission.
     if (diff(duration, RCSwitch::timings[0]) < 200) {
@@ -700,6 +751,7 @@ void RECEIVE_ATTR RCSwitch::handleInterrupt() {
       // with roughly the same gap between them).
       repeatCount++;
       if (repeatCount == 2) {
+		//printf("Do evaluate: %d\n", changeCount);
         for(unsigned int i = 1; i <= numProto; i++) {
           if (receiveProtocol(i, changeCount)) {
             // receive succeeded for protocol i
@@ -711,9 +763,9 @@ void RECEIVE_ATTR RCSwitch::handleInterrupt() {
     }
     changeCount = 0;
   }
- 
   // detect overflow
   if (changeCount >= RCSWITCH_MAX_CHANGES) {
+	//printf("Overflow: %d\n", changeCount );
     changeCount = 0;
     repeatCount = 0;
   }
